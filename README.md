@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="sandbox-rl logo" width="200">
+</p>
+
 # sandbox-rl
 
 [![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://www.python.org/)
