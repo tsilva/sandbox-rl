@@ -4,7 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a reinforcement learning sandbox implementing PPO (Proximal Policy Optimization) for Gymnasium environments. Each environment has a standalone, self-contained Python script with no shared code between implementations.
+This is a **learning/testing sandbox** for reinforcement learning on Gymnasium environments.
+
+### Typical Workflow
+
+When a user asks to **"solve"** an environment:
+
+1. **Write a single self-contained file** for the env/algorithm combo (e.g., `ppo_cartpole.py`)
+2. **Check the Gymnasium docs** to find the reward threshold that defines "solved" for that environment
+3. **Run the training script** and monitor progress
+4. **If errors occur or training stalls**, debug and iterate — keep modifying and re-running until the environment is solved
+5. **Once the reward threshold is reached**, run the script with `--play` to playback the trained policy for the user
+
+The goal is educational — each file serves as a readable, runnable reference implementation that can be studied, modified, and learned from.
+
+## Design Philosophy
+
+**One flat file per environment/algorithm combination.** Each script (e.g., `ppo_cartpole.py`, `ppo_mountaincar.py`) must be completely self-contained:
+
+- **No imports from other project files** — only external libraries (torch, numpy, gymnasium, etc.)
+- **Duplicate code freely** — copy/paste shared logic between files rather than abstracting
+- **No shared modules, utilities, or base classes** — every file stands alone
+- **Easy to read, copy, and modify independently** — each file is a complete implementation
+
+This intentional duplication keeps each implementation simple, portable, and easy to understand without jumping between files.
 
 ## Commands
 
@@ -15,10 +38,12 @@ pip install torch numpy gymnasium
 # Train models
 python ppo_cartpole.py          # Train CartPole agent
 python ppo_mountaincar.py       # Train MountainCar agent
+python ppo_lunarlander.py       # Train LunarLander agent
 
 # Play with trained models
 python ppo_cartpole.py --play              # Watch trained agent
 python ppo_cartpole.py --play --episodes 10  # Specify episode count
+python ppo_lunarlander.py --play           # Watch LunarLander agent
 ```
 
 ## Architecture
