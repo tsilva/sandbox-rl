@@ -195,9 +195,9 @@ def ppo_update(model, optimizer, states, actions, old_log_probs, returns, advant
 
 
 def train(session_path: str = None, reason: str = "Initial training attempt",
-          diagnosis: str = ""):
+          diagnosis: str = "", hp_overrides: dict = None):
     """Main training loop with vectorized environments."""
-    # Hyperparameters
+    # Default hyperparameters
     n_envs = 16  # More parallel environments for complex control
     n_steps = 256  # Longer rollouts (total batch = 4096)
     batch_size = 64
@@ -210,6 +210,20 @@ def train(session_path: str = None, reason: str = "Initial training attempt",
     entropy_coef = 0.01
     max_iterations = 1000
     solve_threshold = SOLVE_THRESHOLD
+
+    # Apply hyperparameter overrides
+    if hp_overrides:
+        if "n_envs" in hp_overrides: n_envs = hp_overrides["n_envs"]
+        if "n_steps" in hp_overrides: n_steps = hp_overrides["n_steps"]
+        if "batch_size" in hp_overrides: batch_size = hp_overrides["batch_size"]
+        if "n_epochs" in hp_overrides: n_epochs = hp_overrides["n_epochs"]
+        if "lr" in hp_overrides: lr = hp_overrides["lr"]
+        if "gamma" in hp_overrides: gamma = hp_overrides["gamma"]
+        if "lam" in hp_overrides: lam = hp_overrides["lam"]
+        if "clip_eps" in hp_overrides: clip_eps = hp_overrides["clip_eps"]
+        if "value_coef" in hp_overrides: value_coef = hp_overrides["value_coef"]
+        if "entropy_coef" in hp_overrides: entropy_coef = hp_overrides["entropy_coef"]
+        if "max_iterations" in hp_overrides: max_iterations = hp_overrides["max_iterations"]
 
     # Session mode setup
     run_path = None
@@ -458,6 +472,26 @@ def play(num_episodes: int = 5, session_path: str = None):
     print("\nPlayback complete.")
 
 
+def parse_hp_overrides(hp_args: list) -> dict:
+    """Parse --hp key=value arguments into a dict."""
+    overrides = {}
+    if not hp_args:
+        return overrides
+    for hp in hp_args:
+        if "=" not in hp:
+            print(f"Warning: Invalid --hp format '{hp}', expected key=value")
+            continue
+        key, value = hp.split("=", 1)
+        # Type conversion
+        if key in ("n_envs", "n_steps", "batch_size", "n_epochs", "max_iterations"):
+            overrides[key] = int(value)
+        elif key in ("lr", "gamma", "lam", "clip_eps", "value_coef", "entropy_coef"):
+            overrides[key] = float(value)
+        else:
+            print(f"Warning: Unknown hyperparameter '{key}'")
+    return overrides
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=f"PPO for {ENV_FULL_NAME}")
     parser.add_argument("--play", action="store_true", help="Play back saved policy")
@@ -468,7 +502,11 @@ if __name__ == "__main__":
                         help="Reason for starting this run (logged in session.log)")
     parser.add_argument("--diagnosis", type=str, default="",
                         help="Diagnosis from previous run explaining what to improve")
+    parser.add_argument("--hp", type=str, action="append", metavar="KEY=VALUE",
+                        help="Hyperparameter override (can be used multiple times)")
     args = parser.parse_args()
+
+    hp_overrides = parse_hp_overrides(args.hp)
 
     if args.play:
         play(args.episodes, session_path=args.session if args.session and args.session != "NEW" else None)
@@ -483,6 +521,7 @@ if __name__ == "__main__":
                     print(f"Error: Session path does not exist: {session_path}")
                     exit(1)
                 print(f"Continuing session: {session_path}")
-            train(session_path=session_path, reason=args.reason, diagnosis=args.diagnosis)
+            train(session_path=session_path, reason=args.reason, diagnosis=args.diagnosis,
+                  hp_overrides=hp_overrides)
         else:
-            train()
+            train(hp_overrides=hp_overrides)
