@@ -9,6 +9,8 @@ Usage:
 
 import argparse
 import os
+import json
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -18,6 +20,286 @@ from torch.distributions import Categorical
 
 # Standardized model path
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "ppo_cartpole.pt")
+
+# Environment constants
+ENV_NAME = "cartpole"
+ENV_FULL_NAME = "CartPole-v1"
+SOLVE_THRESHOLD = 475
+
+
+# =============================================================================
+# Session/Run Management Functions
+# =============================================================================
+
+def create_session(env_name: str, env_full_name: str, solve_threshold: float,
+                   base_dir: str = "sessions") -> str:
+    """Create new session folder and initialize decision log."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_name = f"{env_name}_{timestamp}"
+    session_path = os.path.join(os.path.dirname(__file__), base_dir, session_name)
+    os.makedirs(session_path, exist_ok=True)
+
+    with open(os.path.join(session_path, "session.log"), "w") as f:
+        f.write("=" * 80 + "\n")
+        f.write(f"SESSION: {env_name} | Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Environment: {env_full_name} | Solve Threshold: {solve_threshold}\n")
+        f.write("=" * 80 + "\n\n")
+    return session_path
+
+
+def get_next_run_id(session_path: str) -> str:
+    """Get next sequential run ID."""
+    existing = [d for d in os.listdir(session_path) if d.startswith("run_")]
+    return f"run_{len(existing) + 1:03d}"
+
+
+def log_decision(session_path: str, message: str):
+    """Append entry to session.log."""
+    with open(os.path.join(session_path, "session.log"), "a") as f:
+        f.write(message + "\n")
+
+
+def start_run(session_path: str, reason: str, diagnosis: str, config: dict) -> tuple[str, str]:
+    """Create run folder, log RUN_START with reasoning. Returns (run_path, run_id)."""
+    run_id = get_next_run_id(session_path)
+    run_path = os.path.join(session_path, run_id)
+    os.makedirs(run_path, exist_ok=True)
+
+    with open(os.path.join(run_path, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timesteps_per_iter = config["n_envs"] * config["n_steps"]
+
+    log_entry = f"""
+{'='*80}
+[{timestamp}] RUN START: {run_id}
+{'='*80}
+
+OBJECTIVE: Solve {ENV_FULL_NAME} (reward >= {SOLVE_THRESHOLD}) in minimum timesteps
+
+REASONING: {reason}
+"""
+    if diagnosis:
+        log_entry += f"""
+DIAGNOSIS FROM PREVIOUS RUN:
+{diagnosis}
+"""
+    log_entry += f"""
+HYPERPARAMETERS:
+  n_envs={config['n_envs']}, n_steps={config['n_steps']} -> {timesteps_per_iter} timesteps/iteration
+  batch_size={config['batch_size']}, n_epochs={config['n_epochs']}
+  lr={config['lr']}, gamma={config['gamma']}, lam={config['lam']}
+  clip_eps={config['clip_eps']}, value_coef={config['value_coef']}, entropy_coef={config['entropy_coef']}
+  max_iterations={config['max_iterations']} -> max {config['max_iterations'] * timesteps_per_iter:,} timesteps
+
+"""
+    log_decision(session_path, log_entry)
+    return run_path, run_id
+
+
+def stop_run(session_path: str, run_id: str, status: str, diagnosis: str,
+             best_reward: float, iterations: int, total_timesteps: int):
+    """Log RUN_STOP with results and diagnosis for next run."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    log_entry = f"""
+{'-'*80}
+[{timestamp}] RUN END: {run_id}
+{'-'*80}
+
+RESULT: {status}
+  Best Reward: {best_reward:.1f}
+  Iterations: {iterations}
+  Total Timesteps: {total_timesteps:,}
+
+DIAGNOSIS:
+{diagnosis}
+
+"""
+    log_decision(session_path, log_entry)
+
+
+def get_all_runs_summary(session_path: str) -> list[dict]:
+    """Get summary of all runs in the session."""
+    runs = []
+    for entry in sorted(os.listdir(session_path)):
+        if entry.startswith("run_"):
+            run_path = os.path.join(session_path, entry)
+            config_file = os.path.join(run_path, "config.json")
+            metrics_file = os.path.join(run_path, "metrics.json")
+
+            if os.path.exists(config_file):
+                with open(config_file) as f:
+                    config = json.load(f)
+
+                # Calculate total timesteps from config
+                timesteps_per_iter = config["n_envs"] * config["n_steps"]
+
+                # Get final metrics
+                final_reward = None
+                iterations = 0
+                solved = False
+                if os.path.exists(metrics_file):
+                    with open(metrics_file) as f:
+                        metrics = json.load(f)
+                    if metrics:
+                        iterations = metrics[-1]["iteration"]
+                        final_reward = metrics[-1]["reward_mean"]
+                        solved = final_reward >= SOLVE_THRESHOLD
+
+                total_timesteps = iterations * timesteps_per_iter
+
+                runs.append({
+                    "run_id": entry,
+                    "config": config,
+                    "iterations": iterations,
+                    "total_timesteps": total_timesteps,
+                    "final_reward": final_reward,
+                    "solved": solved,
+                })
+    return runs
+
+
+def find_best_run(runs: list[dict]) -> dict | None:
+    """Find the best run (solved with minimum timesteps)."""
+    solved_runs = [r for r in runs if r["solved"]]
+    if not solved_runs:
+        return None
+    return min(solved_runs, key=lambda r: r["total_timesteps"])
+
+
+def log_session_summary(session_path: str):
+    """Log a summary comparing all runs at the end of the session."""
+    runs = get_all_runs_summary(session_path)
+    if not runs:
+        return
+
+    best_run = find_best_run(runs)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    summary = f"""
+{'='*80}
+[{timestamp}] SESSION SUMMARY
+{'='*80}
+
+RUNS COMPARISON:
+"""
+    # Sort by timesteps for comparison
+    sorted_runs = sorted(runs, key=lambda r: r["total_timesteps"] if r["solved"] else float('inf'))
+
+    for i, run in enumerate(sorted_runs, 1):
+        status = "SOLVED" if run["solved"] else "NOT SOLVED"
+        marker = " <-- BEST" if best_run and run["run_id"] == best_run["run_id"] else ""
+        summary += f"""
+  {i}. {run['run_id']}: {run['total_timesteps']:,} timesteps ({run['iterations']} iterations) - {status}{marker}
+     lr={run['config']['lr']}, n_envs={run['config']['n_envs']}, n_steps={run['config']['n_steps']}
+     n_epochs={run['config']['n_epochs']}, entropy_coef={run['config']['entropy_coef']}
+"""
+
+    if best_run:
+        summary += f"""
+{'='*80}
+BEST SOLUTION: {best_run['run_id']}
+{'='*80}
+
+Solved in {best_run['total_timesteps']:,} timesteps ({best_run['iterations']} iterations)
+Final reward: {best_run['final_reward']:.1f}
+
+WINNING HYPERPARAMETERS:
+  n_envs={best_run['config']['n_envs']}
+  n_steps={best_run['config']['n_steps']}
+  batch_size={best_run['config']['batch_size']}
+  n_epochs={best_run['config']['n_epochs']}
+  lr={best_run['config']['lr']}
+  gamma={best_run['config']['gamma']}
+  lam={best_run['config']['lam']}
+  clip_eps={best_run['config']['clip_eps']}
+  value_coef={best_run['config']['value_coef']}
+  entropy_coef={best_run['config']['entropy_coef']}
+
+"""
+    else:
+        summary += f"""
+{'='*80}
+NO SUCCESSFUL SOLUTION
+{'='*80}
+None of the runs achieved the solve threshold of {SOLVE_THRESHOLD}.
+
+"""
+
+    log_decision(session_path, summary)
+
+
+def save_best_hyperparams(session_path: str, config: dict, run_id: str,
+                          total_timesteps: int, final_reward: float):
+    """Save the best hyperparameters to a JSON file."""
+    best_hp = {
+        "run_id": run_id,
+        "total_timesteps": total_timesteps,
+        "final_reward": final_reward,
+        "hyperparameters": config,
+    }
+    with open(os.path.join(session_path, "best_hyperparams.json"), "w") as f:
+        json.dump(best_hp, f, indent=2)
+
+
+def save_checkpoint(run_path: str, model, obs_dim: int, act_dim: int,
+                    iteration: int, reward: float):
+    """Save checkpoint on improvement."""
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "obs_dim": obs_dim,
+        "act_dim": act_dim,
+        "iteration": iteration,
+        "reward": reward,
+    }, os.path.join(run_path, "checkpoint_best.pt"))
+
+
+def append_metrics(run_path: str, iteration: int, reward_mean: float,
+                   reward_std: float, num_episodes: int):
+    """Append metrics to metrics.json."""
+    metrics_file = os.path.join(run_path, "metrics.json")
+    metrics = []
+    if os.path.exists(metrics_file):
+        with open(metrics_file) as f:
+            metrics = json.load(f)
+    metrics.append({
+        "iteration": iteration,
+        "reward_mean": reward_mean,
+        "reward_std": reward_std,
+        "num_episodes": num_episodes,
+        "timestamp": datetime.now().isoformat()
+    })
+    with open(metrics_file, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+
+def setup_run_logging(run_path: str):
+    """Return a log function that writes to both console and run.log."""
+    log_file = open(os.path.join(run_path, "run.log"), "w")
+    def log(msg: str):
+        print(msg)
+        log_file.write(msg + "\n")
+        log_file.flush()
+    return log, log_file
+
+
+def get_default_hyperparams() -> dict:
+    """Return default hyperparameters for CartPole."""
+    return {
+        "n_envs": 8,
+        "n_steps": 256,
+        "batch_size": 64,
+        "n_epochs": 10,
+        "lr": 3e-4,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "clip_eps": 0.2,
+        "value_coef": 0.5,
+        "entropy_coef": 0.01,
+        "max_iterations": 500,
+    }
 
 
 class ActorCritic(nn.Module):
@@ -182,24 +464,38 @@ def ppo_update(model, optimizer, states, actions, old_log_probs, returns, advant
             optimizer.step()
 
 
-def train():
+def train(session_path: str = None, reason: str = "Initial training attempt",
+          diagnosis: str = "", hyperparams: dict = None):
     """Main training loop with vectorized environments."""
-    # Hyperparameters
-    n_envs = 8  # Number of parallel environments
-    n_steps = 256  # Steps per env per rollout (total = n_envs * n_steps = 2048)
-    batch_size = 64
-    n_epochs = 10
-    lr = 3e-4
-    gamma = 0.99
-    lam = 0.95
-    clip_eps = 0.2
-    value_coef = 0.5
-    entropy_coef = 0.01
-    max_iterations = 500
-    solve_threshold = 475
+    # Use provided hyperparams or defaults
+    if hyperparams is None:
+        hyperparams = get_default_hyperparams()
+
+    n_envs = hyperparams["n_envs"]
+    n_steps = hyperparams["n_steps"]
+    batch_size = hyperparams["batch_size"]
+    n_epochs = hyperparams["n_epochs"]
+    lr = hyperparams["lr"]
+    gamma = hyperparams["gamma"]
+    lam = hyperparams["lam"]
+    clip_eps = hyperparams["clip_eps"]
+    value_coef = hyperparams["value_coef"]
+    entropy_coef = hyperparams["entropy_coef"]
+    max_iterations = hyperparams["max_iterations"]
+    solve_threshold = SOLVE_THRESHOLD
+
+    # Session mode setup
+    run_path = None
+    run_id = None
+    log_file = None
+    log_fn = print  # Default to print
+
+    if session_path:
+        run_path, run_id = start_run(session_path, reason, diagnosis, hyperparams)
+        log_fn, log_file = setup_run_logging(run_path)
 
     # Vectorized environment
-    envs = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1") for _ in range(n_envs)])
+    envs = gym.vector.SyncVectorEnv([lambda: gym.make(ENV_FULL_NAME) for _ in range(n_envs)])
     obs_dim = envs.single_observation_space.shape[0]
     act_dim = envs.single_action_space.n
 
@@ -211,10 +507,15 @@ def train():
     episode_rewards = []
     episode_reward_buffer = np.zeros(n_envs)
     states, _ = envs.reset()
+    best_reward = float('-inf')
 
-    print("Starting PPO training for CartPole-v1 (vectorized)...")
-    print(f"Using {n_envs} parallel environments")
-    print(f"Target: Average reward >= {solve_threshold} over 100 episodes\n")
+    log_fn(f"Starting PPO training for {ENV_FULL_NAME} (vectorized)...")
+    log_fn(f"Using {n_envs} parallel environments")
+    log_fn(f"Target: Average reward >= {solve_threshold} over 100 episodes")
+    if run_path:
+        log_fn(f"Run path: {run_path}\n")
+    else:
+        log_fn("")
 
     for iteration in range(max_iterations):
         # Collect rollouts
@@ -254,21 +555,40 @@ def train():
         # Evaluate
         if len(episode_rewards) >= 100:
             avg_reward = np.mean(episode_rewards[-100:])
-            print(f"Iteration {iteration + 1}: Avg reward (last 100 eps) = {avg_reward:.2f}")
+            reward_std = np.std(episode_rewards[-100:])
+            log_fn(f"Iteration {iteration + 1}: Avg reward (last 100 eps) = {avg_reward:.2f}")
+
+            # Track metrics and checkpoints in session mode
+            if run_path:
+                append_metrics(run_path, iteration + 1, avg_reward, reward_std, len(episode_rewards))
+                if avg_reward > best_reward:
+                    best_reward = avg_reward
+                    save_checkpoint(run_path, model, obs_dim, act_dim, iteration + 1, avg_reward)
+                    log_fn(f"  -> New best! Saved checkpoint (reward: {avg_reward:.2f})")
 
             if avg_reward >= solve_threshold:
-                print(f"\nSolved! Average reward {avg_reward:.2f} >= {solve_threshold}")
+                log_fn(f"\nSolved! Average reward {avg_reward:.2f} >= {solve_threshold}")
                 break
         else:
             if len(episode_rewards) > 0:
                 avg_reward = np.mean(episode_rewards)
-                print(f"Iteration {iteration + 1}: Avg reward ({len(episode_rewards)} eps) = {avg_reward:.2f}")
+                reward_std = np.std(episode_rewards)
+                log_fn(f"Iteration {iteration + 1}: Avg reward ({len(episode_rewards)} eps) = {avg_reward:.2f}")
+
+                # Track metrics in session mode
+                if run_path:
+                    append_metrics(run_path, iteration + 1, avg_reward, reward_std, len(episode_rewards))
+                    if avg_reward > best_reward:
+                        best_reward = avg_reward
+                        save_checkpoint(run_path, model, obs_dim, act_dim, iteration + 1, avg_reward)
+                        log_fn(f"  -> New best! Saved checkpoint (reward: {avg_reward:.2f})")
 
     envs.close()
+    final_iteration = iteration + 1
 
     # Final evaluation
-    print("\nRunning final evaluation...")
-    eval_env = gym.make("CartPole-v1")
+    log_fn("\nRunning final evaluation...")
+    eval_env = gym.make(ENV_FULL_NAME)
     eval_rewards = []
 
     for _ in range(100):
@@ -289,43 +609,101 @@ def train():
     eval_env.close()
 
     final_avg = np.mean(eval_rewards)
-    print(f"Final evaluation: {final_avg:.2f} average reward over 100 episodes")
+    log_fn(f"Final evaluation: {final_avg:.2f} average reward over 100 episodes")
 
-    if final_avg >= solve_threshold:
-        print("SUCCESS: Environment solved!")
+    solved = final_avg >= solve_threshold
+    if solved:
+        log_fn("SUCCESS: Environment solved!")
     else:
-        print(f"Not yet solved (need {solve_threshold})")
+        log_fn(f"Not yet solved (need {solve_threshold})")
 
-    # Save the trained model
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "obs_dim": int(obs_dim),
-        "act_dim": int(act_dim),
-    }, MODEL_PATH)
-    print(f"\nModel saved to: {MODEL_PATH}")
+    # Handle session mode cleanup
+    total_timesteps = final_iteration * n_envs * n_steps
+    if session_path and run_path:
+        status = "SOLVED" if solved else "NOT_SOLVED"
+
+        # Generate diagnosis for next run
+        if solved:
+            run_diagnosis = (
+                f"Successfully solved in {total_timesteps:,} timesteps ({final_iteration} iterations). "
+                f"Final avg reward: {final_avg:.1f}. Learning was stable with consistent improvement."
+            )
+        else:
+            run_diagnosis = (
+                f"Did not solve after {total_timesteps:,} timesteps. "
+                f"Best reward: {best_reward:.1f}, final eval: {final_avg:.1f}. "
+                f"Consider: adjusting learning rate, increasing entropy for exploration, or more training time."
+            )
+
+        stop_run(session_path, run_id, status, run_diagnosis, best_reward, final_iteration, total_timesteps)
+
+        # Find best run across all runs and update session artifacts
+        import shutil
+        runs = get_all_runs_summary(session_path)
+        best_run = find_best_run(runs)
+
+        if best_run:
+            best_run_path = os.path.join(session_path, best_run["run_id"])
+            best_model_src = os.path.join(best_run_path, "checkpoint_best.pt")
+            best_model_dst = os.path.join(session_path, "best_model.pt")
+
+            if os.path.exists(best_model_src):
+                shutil.copy(best_model_src, best_model_dst)
+                log_fn(f"Best model from {best_run['run_id']} copied to: {best_model_dst}")
+
+            # Save best hyperparameters
+            save_best_hyperparams(
+                session_path, best_run["config"], best_run["run_id"],
+                best_run["total_timesteps"], best_run["final_reward"]
+            )
+            log_fn(f"Best hyperparams saved to: {os.path.join(session_path, 'best_hyperparams.json')}")
+
+        # Log session summary comparing all runs
+        log_session_summary(session_path)
+        log_fn(f"Session summary appended to: {os.path.join(session_path, 'session.log')}")
+
+        if log_file:
+            log_file.close()
+    else:
+        # Legacy mode: save to standard location
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "obs_dim": int(obs_dim),
+            "act_dim": int(act_dim),
+        }, MODEL_PATH)
+        log_fn(f"\nModel saved to: {MODEL_PATH}")
 
     return model
 
 
-def play(num_episodes: int = 5):
+def play(num_episodes: int = 5, session_path: str = None):
     """Play back a trained policy with rendering."""
-    if not os.path.exists(MODEL_PATH):
-        print(f"No saved model found at {MODEL_PATH}")
-        print("Please train first: python ppo_cartpole.py")
-        return
+    # Determine model path
+    if session_path:
+        model_path = os.path.join(session_path, "best_model.pt")
+        if not os.path.exists(model_path):
+            print(f"No best model found at {model_path}")
+            print("Session may not have completed successfully.")
+            return
+    else:
+        model_path = MODEL_PATH
+        if not os.path.exists(model_path):
+            print(f"No saved model found at {model_path}")
+            print("Please train first: python ppo_cartpole.py")
+            return
 
     # Load model
-    checkpoint = torch.load(MODEL_PATH, weights_only=True)
+    checkpoint = torch.load(model_path, weights_only=True)
     model = ActorCritic(checkpoint["obs_dim"], checkpoint["act_dim"])
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    print(f"Loaded model from {MODEL_PATH}")
+    print(f"Loaded model from {model_path}")
     print(f"Playing {num_episodes} episodes...\n")
 
     # Create environment with human rendering
-    env = gym.make("CartPole-v1", render_mode="human")
+    env = gym.make(ENV_FULL_NAME, render_mode="human")
 
     for ep in range(num_episodes):
         state, _ = env.reset()
@@ -348,12 +726,81 @@ def play(num_episodes: int = 5):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PPO for CartPole-v1")
+    defaults = get_default_hyperparams()
+
+    parser = argparse.ArgumentParser(
+        description=f"PPO for {ENV_FULL_NAME}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Hyperparameter overrides:
+  Use --hp to override any hyperparameter: --hp lr=1e-3 --hp n_envs=16
+
+  Available hyperparameters:
+    n_envs        Number of parallel environments (default: 8)
+    n_steps       Steps per env per rollout (default: 256)
+    batch_size    Minibatch size for updates (default: 64)
+    n_epochs      PPO epochs per iteration (default: 10)
+    lr            Learning rate (default: 3e-4)
+    gamma         Discount factor (default: 0.99)
+    lam           GAE lambda (default: 0.95)
+    clip_eps      PPO clip epsilon (default: 0.2)
+    value_coef    Value loss coefficient (default: 0.5)
+    entropy_coef  Entropy bonus coefficient (default: 0.01)
+    max_iterations Maximum training iterations (default: 500)
+"""
+    )
     parser.add_argument("--play", action="store_true", help="Play back saved policy")
     parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to play")
+    parser.add_argument("--session", type=str,
+                        help="Path to existing session to continue (omit to create new)")
+    parser.add_argument("--reason", type=str, default="Initial training attempt",
+                        help="Reason for starting this run (logged in session.log)")
+    parser.add_argument("--diagnosis", type=str, default="",
+                        help="Diagnosis from previous run explaining what to improve")
+    parser.add_argument("--hp", action="append", metavar="KEY=VALUE",
+                        help="Hyperparameter override (can use multiple times)")
     args = parser.parse_args()
 
+    # Parse hyperparameter overrides
+    hyperparams = defaults.copy()
+    if args.hp:
+        for hp_str in args.hp:
+            if "=" not in hp_str:
+                print(f"Error: Invalid hyperparameter format '{hp_str}'. Use KEY=VALUE")
+                exit(1)
+            key, value = hp_str.split("=", 1)
+            if key not in defaults:
+                print(f"Error: Unknown hyperparameter '{key}'")
+                print(f"Available: {', '.join(defaults.keys())}")
+                exit(1)
+            # Convert to appropriate type
+            default_val = defaults[key]
+            try:
+                if isinstance(default_val, int):
+                    hyperparams[key] = int(value)
+                elif isinstance(default_val, float):
+                    hyperparams[key] = float(value)
+                else:
+                    hyperparams[key] = value
+            except ValueError:
+                print(f"Error: Cannot convert '{value}' to {type(default_val).__name__} for '{key}'")
+                exit(1)
+
     if args.play:
-        play(args.episodes)
+        play(args.episodes, session_path=args.session)
     else:
-        train()
+        # Session logging is always enabled
+        if args.session:
+            # Continue existing session
+            session_path = args.session
+            if not os.path.isdir(session_path):
+                print(f"Error: Session path does not exist: {session_path}")
+                exit(1)
+            print(f"Continuing session: {session_path}")
+        else:
+            # Create new session
+            session_path = create_session(ENV_NAME, ENV_FULL_NAME, SOLVE_THRESHOLD)
+            print(f"Created new session: {session_path}")
+
+        train(session_path=session_path, reason=args.reason,
+              diagnosis=args.diagnosis, hyperparams=hyperparams)

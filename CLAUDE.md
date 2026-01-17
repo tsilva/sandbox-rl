@@ -10,11 +10,19 @@ This is a **learning/testing sandbox** for reinforcement learning on Gymnasium e
 
 When a user asks to **"solve"** an environment:
 
-1. **Write a single self-contained file** for the env/algorithm combo (e.g., `ppo_cartpole.py`)
+1. **If no script exists**, write a single self-contained file for the env/algorithm combo (e.g., `ppo_cartpole.py`)
 2. **Check the Gymnasium docs** to find the reward threshold that defines "solved" for that environment
-3. **Run the training script** and monitor progress
-4. **If errors occur or training stalls**, debug and iterate — keep modifying and re-running until the environment is solved
-5. **Once the reward threshold is reached**, run the script with `--play` to playback the trained policy for the user
+3. **Run training** — each run creates a session with detailed logs
+4. **Analyze results** and iterate with adjusted hyperparameters based on diagnosis
+5. **Once solved**, run with `--play` to demonstrate the trained policy
+
+**Solving Objective**: Achieve maximum reward in the **minimum number of timesteps**. Each run should learn from previous attempts.
+
+**Session Structure**:
+- If user says "try N times" → do exactly N runs, improving each time
+- If no count specified → do as many runs as needed to hit the reward threshold
+
+The session log (`session.log`) documents the reasoning behind each run, making it educational for learning RL engineering thinking.
 
 The goal is educational — each file serves as a readable, runnable reference implementation that can be studied, modified, and learned from.
 
@@ -35,15 +43,39 @@ This intentional duplication keeps each implementation simple, portable, and eas
 # Install dependencies
 pip install torch numpy gymnasium
 
-# Train models
-python ppo_cartpole.py          # Train CartPole agent
-python ppo_mountaincar.py       # Train MountainCar agent
-python ppo_lunarlander.py       # Train LunarLander agent
+# Train (creates new session with logging)
+python ppo_cartpole.py
+python ppo_cartpole.py --reason "Testing higher learning rate" --hp lr=5e-4
+
+# Continue existing session with new run
+python ppo_cartpole.py --session sessions/cartpole_20260117_100000 \
+    --reason "Increasing entropy for exploration" \
+    --diagnosis "Previous run plateaued early" \
+    --hp entropy_coef=0.02
+
+# Available hyperparameter overrides (--hp key=value)
+#   n_envs, n_steps, batch_size, n_epochs, lr, gamma, lam,
+#   clip_eps, value_coef, entropy_coef, max_iterations
 
 # Play with trained models
 python ppo_cartpole.py --play              # Watch trained agent
 python ppo_cartpole.py --play --episodes 10  # Specify episode count
-python ppo_lunarlander.py --play           # Watch LunarLander agent
+```
+
+## Session Structure
+
+Each training run creates a session directory:
+```
+sessions/cartpole_20260117_100000/
+├── session.log          # High-level log: reasoning, params, diagnosis per run
+├── best_model.pt        # Best model from successful solve
+├── run_001/
+│   ├── config.json      # Hyperparameters used
+│   ├── run.log          # Detailed training output
+│   ├── metrics.json     # Per-iteration metrics
+│   └── checkpoint_best.pt
+└── run_002/
+    └── ...
 ```
 
 ## Architecture

@@ -9,8 +9,10 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -22,17 +24,118 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+# Standardized model path
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "ppo_carracing.pt")
+
+# Environment constants
+ENV_NAME = "carracing"
+ENV_FULL_NAME = "CarRacing-v2"
+SOLVE_THRESHOLD = 900
+
+
+# ============================================================================
+# Session/Run Management Functions
+# ============================================================================
+
+def create_session(env_name: str, env_full_name: str, solve_threshold: float,
+                   base_dir: str = "sessions") -> str:
+    """Create new session folder and initialize decision log."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_name = f"{env_name}_{timestamp}"
+    session_path = os.path.join(os.path.dirname(__file__), base_dir, session_name)
+    os.makedirs(session_path, exist_ok=True)
+
+    with open(os.path.join(session_path, "session.log"), "w") as f:
+        f.write("=" * 80 + "\n")
+        f.write(f"SESSION: {env_name} | Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Environment: {env_full_name} | Solve Threshold: {solve_threshold}\n")
+        f.write("=" * 80 + "\n\n")
+    return session_path
+
+
+def get_next_run_id(session_path: str) -> str:
+    """Get next sequential run ID."""
+    existing = [d for d in os.listdir(session_path) if d.startswith("run_")]
+    return f"run_{len(existing) + 1:03d}"
+
+
+def log_decision(session_path: str, message: str):
+    """Append entry to session.log."""
+    with open(os.path.join(session_path, "session.log"), "a") as f:
+        f.write(message + "\n")
+
+
+def start_run(session_path: str, reason: str, config: dict) -> tuple[str, str]:
+    """Create run folder, log RUN_START, save config.json. Returns (run_path, run_id)."""
+    run_id = get_next_run_id(session_path)
+    run_path = os.path.join(session_path, run_id)
+    os.makedirs(run_path, exist_ok=True)
+
+    with open(os.path.join(run_path, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    config_str = ", ".join(f"{k}={v}" for k, v in config.items())
+    log_decision(session_path, f"[{timestamp}] RUN_START {run_id}\n  Reason: {reason}\n  Config: {config_str}\n")
+
+    return run_path, run_id
+
+
+def stop_run(session_path: str, run_id: str, status: str, reason: str,
+             best_reward: float, iterations: int):
+    """Log RUN_STOP with final metrics."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_decision(session_path,
+        f"[{timestamp}] RUN_STOP {run_id}\n"
+        f"  Status: {status}\n"
+        f"  Reason: {reason}\n"
+        f"  Best Reward: {best_reward:.1f} | Iterations: {iterations}\n")
+
+
+def save_checkpoint(run_path: str, model, n_stack: int, action_dim: int,
+                    iteration: int, reward: float):
+    """Save checkpoint on improvement."""
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "n_stack": n_stack,
+        "action_dim": action_dim,
+        "iteration": iteration,
+        "reward": reward,
+    }, os.path.join(run_path, "checkpoint_best.pt"))
+
+
+def append_metrics(run_path: str, iteration: int, reward_mean: float,
+                   reward_std: float, num_episodes: int):
+    """Append metrics to metrics.json."""
+    metrics_file = os.path.join(run_path, "metrics.json")
+    metrics = []
+    if os.path.exists(metrics_file):
+        with open(metrics_file) as f:
+            metrics = json.load(f)
+    metrics.append({
+        "iteration": iteration,
+        "reward_mean": reward_mean,
+        "reward_std": reward_std,
+        "num_episodes": num_episodes,
+        "timestamp": datetime.now().isoformat()
+    })
+    with open(metrics_file, "w") as f:
+        json.dump(metrics, f, indent=2)
+
 
 # ============================================================================
 # Logging Setup
 # ============================================================================
 
-def setup_logging(log_dir: str = "logs") -> logging.Logger:
+def setup_logging(log_dir: str = "logs", run_path: str = None) -> logging.Logger:
     """Setup logging to both console and file."""
-    os.makedirs(log_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"carracing_{timestamp}.log")
+    # Use run_path for session mode, otherwise use log_dir
+    if run_path:
+        log_file = os.path.join(run_path, "run.log")
+    else:
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"carracing_{timestamp}.log")
 
     # Create logger
     logger = logging.getLogger("carracing")
@@ -474,11 +577,8 @@ def ppo_update(
 # Training
 # ============================================================================
 
-def train():
+def train(session_path: str = None, reason: str = "Initial training attempt"):
     """Main training loop."""
-    # Setup logging
-    logger, log_file = setup_logging()
-
     # Hyperparameters
     n_envs = 8
     n_steps = 256  # Increased for more data per update
@@ -502,12 +602,31 @@ def train():
     skip_initial_frames = 50  # Skip zoom animation
 
     # Solved threshold
-    solved_threshold = 900
+    solved_threshold = SOLVE_THRESHOLD
+
+    # Session mode setup
+    run_path = None
+    run_id = None
+
+    if session_path:
+        config = {
+            "n_envs": n_envs, "n_steps": n_steps, "batch_size": batch_size,
+            "n_epochs": n_epochs, "learning_rate": learning_rate, "gamma": gamma,
+            "gae_lambda": gae_lambda, "clip_coef": clip_coef, "vf_coef": vf_coef,
+            "ent_coef": ent_coef, "max_grad_norm": max_grad_norm,
+            "max_iterations": max_iterations, "action_repeat": action_repeat
+        }
+        run_path, run_id = start_run(session_path, reason, config)
+
+    # Setup logging (use run_path for session mode)
+    logger, log_file = setup_logging(run_path=run_path)
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log(logger, f"Using device: {device}")
     log(logger, f"Logging to: {log_file}")
+    if run_path:
+        log(logger, f"Run path: {run_path}")
 
     # Create vectorized environments with wrappers
     def make_env(skip_init, act_repeat):
@@ -544,7 +663,7 @@ def train():
     obs = frame_stack.get_stacked()
 
     log(logger, "=" * 60)
-    log(logger, "Starting CarRacing-v2 PPO Training")
+    log(logger, f"Starting {ENV_FULL_NAME} PPO Training")
     log(logger, "=" * 60)
     log(logger, f"  n_envs: {n_envs}")
     log(logger, f"  n_steps: {n_steps}")
@@ -558,6 +677,7 @@ def train():
     start_time = time.time()
 
     global_step = 0
+    best_reward = float('-inf')
 
     for iteration in range(1, max_iterations + 1):
         # Collect rollout
@@ -632,6 +752,7 @@ def train():
             if len(episode_rewards) > 0:
                 recent_rewards = episode_rewards[-100:] if len(episode_rewards) >= 100 else episode_rewards
                 avg_reward = np.mean(recent_rewards)
+                reward_std = np.std(recent_rewards)
                 elapsed = time.time() - start_time
                 fps = global_step / elapsed if elapsed > 0 else 0
 
@@ -641,20 +762,25 @@ def train():
                       f"PG: {pg_loss:.4f} | VF: {vf_loss:.4f} | "
                       f"Ent: {entropy:.4f} | FPS: {fps:.0f}")
 
+                # Track metrics and checkpoints in session mode
+                if run_path:
+                    append_metrics(run_path, iteration, avg_reward, reward_std, len(episode_rewards))
+                    if avg_reward > best_reward:
+                        best_reward = avg_reward
+                        save_checkpoint(run_path, model, n_stack, action_dim, iteration, avg_reward)
+                        log(logger, f"  -> New best! Saved checkpoint (reward: {avg_reward:.1f})")
+
                 # Check if solved
                 if avg_reward >= solved_threshold and len(recent_rewards) >= 100:
                     log(logger, "")
                     log(logger, f"Environment SOLVED with average reward {avg_reward:.1f}!")
                     break
 
-    # Save model
-    os.makedirs("models", exist_ok=True)
-    save_path = "models/ppo_carracing.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "n_stack": n_stack,
-        "action_dim": action_dim,
-    }, save_path)
+    final_iteration = iteration
+
+    # Determine if solved
+    final_avg = np.mean(episode_rewards[-100:]) if len(episode_rewards) >= 100 else np.mean(episode_rewards) if episode_rewards else 0
+    solved = final_avg >= solved_threshold and len(episode_rewards) >= 100
 
     total_time = time.time() - start_time
     log(logger, "=" * 60)
@@ -663,8 +789,33 @@ def train():
     log(logger, f"  Total steps: {global_step}")
     log(logger, f"  Total episodes: {len(episode_rewards)}")
     if len(episode_rewards) > 0:
-        log(logger, f"  Final avg reward (last 100): {np.mean(episode_rewards[-100:]):.1f}")
-    log(logger, f"  Model saved to: {save_path}")
+        log(logger, f"  Final avg reward (last 100): {final_avg:.1f}")
+
+    # Handle session mode cleanup
+    if session_path and run_path:
+        status = "SOLVED" if solved else "COMPLETED"
+        reason_str = f"Reached solve threshold {solved_threshold}" if solved else f"Completed {final_iteration} iterations"
+        stop_run(session_path, run_id, status, reason_str, best_reward, final_iteration)
+
+        if solved:
+            # Copy best model to session root
+            best_model_src = os.path.join(run_path, "checkpoint_best.pt")
+            best_model_dst = os.path.join(session_path, "best_model.pt")
+            if os.path.exists(best_model_src):
+                shutil.copy(best_model_src, best_model_dst)
+                log(logger, f"  Best model copied to: {best_model_dst}")
+
+        log(logger, f"  Run path: {run_path}")
+    else:
+        # Legacy mode: save to standard location
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "n_stack": n_stack,
+            "action_dim": action_dim,
+        }, MODEL_PATH)
+        log(logger, f"  Model saved to: {MODEL_PATH}")
+
     log(logger, f"  Log saved to: {log_file}")
     log(logger, "=" * 60)
 
@@ -677,17 +828,24 @@ def train():
 # Play / Evaluation
 # ============================================================================
 
-def play(episodes: int = 5):
+def play(episodes: int = 5, session_path: str = None):
     """Load trained model and play episodes with rendering."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load model
-    save_path = "models/ppo_carracing.pt"
-    if not os.path.exists(save_path):
-        print(f"No saved model found at {save_path}. Train first.")
-        return
+    # Determine model path
+    if session_path:
+        model_path = os.path.join(session_path, "best_model.pt")
+        if not os.path.exists(model_path):
+            print(f"No best model found at {model_path}")
+            print("Session may not have completed successfully.")
+            return
+    else:
+        model_path = MODEL_PATH
+        if not os.path.exists(model_path):
+            print(f"No saved model found at {model_path}. Train first.")
+            return
 
-    checkpoint = torch.load(save_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device)
     n_stack = checkpoint["n_stack"]
     action_dim = checkpoint["action_dim"]
 
@@ -695,7 +853,7 @@ def play(episodes: int = 5):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    print(f"Loaded model from {save_path}")
+    print(f"Loaded model from {model_path}")
 
     # Create environment with rendering
     env = gym.make("CarRacing-v2", continuous=True, render_mode="human")
@@ -740,12 +898,28 @@ def play(episodes: int = 5):
 # ============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PPO for CarRacing-v2")
+    parser = argparse.ArgumentParser(description=f"PPO for {ENV_FULL_NAME}")
     parser.add_argument("--play", action="store_true", help="Play with trained model")
     parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to play")
+    parser.add_argument("--session", type=str, nargs="?", const="NEW",
+                        help="Session mode: omit path for new session, provide path to continue")
+    parser.add_argument("--reason", type=str, default="Initial training attempt",
+                        help="Reason for starting this run (logged in session.log)")
     args = parser.parse_args()
 
     if args.play:
-        play(args.episodes)
+        play(args.episodes, session_path=args.session if args.session and args.session != "NEW" else None)
     else:
-        train()
+        if args.session:
+            if args.session == "NEW":
+                session_path = create_session(ENV_NAME, ENV_FULL_NAME, SOLVE_THRESHOLD)
+                print(f"Created new session: {session_path}")
+            else:
+                session_path = args.session
+                if not os.path.isdir(session_path):
+                    print(f"Error: Session path does not exist: {session_path}")
+                    exit(1)
+                print(f"Continuing session: {session_path}")
+            train(session_path=session_path, reason=args.reason)
+        else:
+            train()
