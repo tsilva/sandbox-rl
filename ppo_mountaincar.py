@@ -9,14 +9,19 @@ Usage:
 
 import argparse
 import os
-import json
-from datetime import datetime
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import gymnasium as gym
 from torch.distributions import Categorical
+
+from util import (
+    create_session, start_run, stop_run,
+    get_all_runs_summary, find_best_run, log_session_summary,
+    save_best_hyperparams, save_checkpoint, append_metrics, setup_run_logging
+)
 
 # Standardized model path
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "ppo_mountaincar.pt")
@@ -25,106 +30,6 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "ppo_mountaincar.
 ENV_NAME = "mountaincar"
 ENV_FULL_NAME = "MountainCar-v0"
 SOLVE_THRESHOLD = -110
-
-
-# =============================================================================
-# Session/Run Management Functions
-# =============================================================================
-
-def create_session(env_name: str, env_full_name: str, solve_threshold: float,
-                   base_dir: str = "sessions") -> str:
-    """Create new session folder and initialize decision log."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_name = f"{env_name}_{timestamp}"
-    session_path = os.path.join(os.path.dirname(__file__), base_dir, session_name)
-    os.makedirs(session_path, exist_ok=True)
-
-    with open(os.path.join(session_path, "session.log"), "w") as f:
-        f.write("=" * 80 + "\n")
-        f.write(f"SESSION: {env_name} | Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Environment: {env_full_name} | Solve Threshold: {solve_threshold}\n")
-        f.write("=" * 80 + "\n\n")
-    return session_path
-
-
-def get_next_run_id(session_path: str) -> str:
-    """Get next sequential run ID."""
-    existing = [d for d in os.listdir(session_path) if d.startswith("run_")]
-    return f"run_{len(existing) + 1:03d}"
-
-
-def log_decision(session_path: str, message: str):
-    """Append entry to session.log."""
-    with open(os.path.join(session_path, "session.log"), "a") as f:
-        f.write(message + "\n")
-
-
-def start_run(session_path: str, reason: str, config: dict) -> tuple[str, str]:
-    """Create run folder, log RUN_START, save config.json. Returns (run_path, run_id)."""
-    run_id = get_next_run_id(session_path)
-    run_path = os.path.join(session_path, run_id)
-    os.makedirs(run_path, exist_ok=True)
-
-    with open(os.path.join(run_path, "config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    config_str = ", ".join(f"{k}={v}" for k, v in config.items())
-    log_decision(session_path, f"[{timestamp}] RUN_START {run_id}\n  Reason: {reason}\n  Config: {config_str}\n")
-
-    return run_path, run_id
-
-
-def stop_run(session_path: str, run_id: str, status: str, reason: str,
-             best_reward: float, iterations: int):
-    """Log RUN_STOP with final metrics."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_decision(session_path,
-        f"[{timestamp}] RUN_STOP {run_id}\n"
-        f"  Status: {status}\n"
-        f"  Reason: {reason}\n"
-        f"  Best Reward: {best_reward:.1f} | Iterations: {iterations}\n")
-
-
-def save_checkpoint(run_path: str, model, obs_dim: int, act_dim: int,
-                    iteration: int, reward: float):
-    """Save checkpoint on improvement."""
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "obs_dim": obs_dim,
-        "act_dim": act_dim,
-        "iteration": iteration,
-        "reward": reward,
-    }, os.path.join(run_path, "checkpoint_best.pt"))
-
-
-def append_metrics(run_path: str, iteration: int, reward_mean: float,
-                   reward_std: float, num_episodes: int):
-    """Append metrics to metrics.json."""
-    metrics_file = os.path.join(run_path, "metrics.json")
-    metrics = []
-    if os.path.exists(metrics_file):
-        with open(metrics_file) as f:
-            metrics = json.load(f)
-    metrics.append({
-        "iteration": iteration,
-        "reward_mean": reward_mean,
-        "reward_std": reward_std,
-        "num_episodes": num_episodes,
-        "timestamp": datetime.now().isoformat()
-    })
-    with open(metrics_file, "w") as f:
-        json.dump(metrics, f, indent=2)
-
-
-def setup_run_logging(run_path: str):
-    """Return a log function that writes to both console and run.log."""
-    log_file = open(os.path.join(run_path, "run.log"), "w")
-    def log(msg: str):
-        print(msg)
-        log_file.write(msg + "\n")
-        log_file.flush()
-    return log, log_file
 
 
 class ActorCritic(nn.Module):
@@ -306,7 +211,8 @@ def shape_reward_vectorized(states, next_states, rewards, dones):
     return rewards + height_reward + velocity_reward + goal_bonus
 
 
-def train(session_path: str = None, reason: str = "Initial training attempt"):
+def train(session_path: str = None, reason: str = "Initial training attempt",
+          diagnosis: str = ""):
     """Main training loop with vectorized environments."""
     # Hyperparameters - tuned for MountainCar
     n_envs = 16  # More parallel environments help with exploration
@@ -335,7 +241,8 @@ def train(session_path: str = None, reason: str = "Initial training attempt"):
             "clip_eps": clip_eps, "value_coef": value_coef,
             "entropy_coef": entropy_coef, "max_iterations": max_iterations
         }
-        run_path, run_id = start_run(session_path, reason, config)
+        run_path, run_id = start_run(session_path, reason, diagnosis, config,
+                                      ENV_FULL_NAME, SOLVE_THRESHOLD)
         log_fn, log_file = setup_run_logging(run_path)
 
     # Vectorized environment
@@ -465,19 +372,48 @@ def train(session_path: str = None, reason: str = "Initial training attempt"):
         log_fn(f"Not yet solved (need >= {solve_threshold})")
 
     # Handle session mode cleanup
+    total_timesteps = final_iteration * n_envs * n_steps
     if session_path and run_path:
-        status = "SOLVED" if solved else "COMPLETED"
-        reason = f"Reached solve threshold {solve_threshold}" if solved else f"Completed {final_iteration} iterations"
-        stop_run(session_path, run_id, status, reason, best_reward, final_iteration)
+        status = "SOLVED" if solved else "NOT_SOLVED"
 
+        # Generate diagnosis for next run
         if solved:
-            # Copy best model to session root
-            import shutil
-            best_model_src = os.path.join(run_path, "checkpoint_best.pt")
+            run_diagnosis = (
+                f"Successfully solved in {total_timesteps:,} timesteps ({final_iteration} iterations). "
+                f"Final avg reward: {final_avg:.1f}. Learning was stable with consistent improvement."
+            )
+        else:
+            run_diagnosis = (
+                f"Did not solve after {total_timesteps:,} timesteps. "
+                f"Best reward: {best_reward:.1f}, final eval: {final_avg:.1f}. "
+                f"Consider: adjusting learning rate, increasing entropy for exploration, or more training time."
+            )
+
+        stop_run(session_path, run_id, status, run_diagnosis, best_reward, final_iteration, total_timesteps)
+
+        # Find best run across all runs and update session artifacts
+        runs = get_all_runs_summary(session_path, SOLVE_THRESHOLD)
+        best_run = find_best_run(runs)
+
+        if best_run:
+            best_run_path = os.path.join(session_path, best_run["run_id"])
+            best_model_src = os.path.join(best_run_path, "checkpoint_best.pt")
             best_model_dst = os.path.join(session_path, "best_model.pt")
+
             if os.path.exists(best_model_src):
                 shutil.copy(best_model_src, best_model_dst)
-                log_fn(f"Best model copied to: {best_model_dst}")
+                log_fn(f"Best model from {best_run['run_id']} copied to: {best_model_dst}")
+
+            # Save best hyperparameters
+            save_best_hyperparams(
+                session_path, best_run["config"], best_run["run_id"],
+                best_run["total_timesteps"], best_run["final_reward"]
+            )
+            log_fn(f"Best hyperparams saved to: {os.path.join(session_path, 'best_hyperparams.json')}")
+
+        # Log session summary comparing all runs
+        log_session_summary(session_path, SOLVE_THRESHOLD)
+        log_fn(f"Session summary appended to: {os.path.join(session_path, 'session.log')}")
 
         if log_file:
             log_file.close()
@@ -550,6 +486,8 @@ if __name__ == "__main__":
                         help="Session mode: omit path for new session, provide path to continue")
     parser.add_argument("--reason", type=str, default="Initial training attempt",
                         help="Reason for starting this run (logged in session.log)")
+    parser.add_argument("--diagnosis", type=str, default="",
+                        help="Diagnosis from previous run explaining what to improve")
     args = parser.parse_args()
 
     if args.play:
@@ -565,6 +503,6 @@ if __name__ == "__main__":
                     print(f"Error: Session path does not exist: {session_path}")
                     exit(1)
                 print(f"Continuing session: {session_path}")
-            train(session_path=session_path, reason=args.reason)
+            train(session_path=session_path, reason=args.reason, diagnosis=args.diagnosis)
         else:
             train()
