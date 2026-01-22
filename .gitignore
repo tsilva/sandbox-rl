@@ -2,3 +2,5 @@
 __pycache__
 models/*
 logs/*
+sessions/*
+models/*

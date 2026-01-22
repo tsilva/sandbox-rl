@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,8 +17,19 @@ import numpy as np
 import gymnasium as gym
 from torch.distributions import Categorical
 
+from util import (
+    create_session, start_run, stop_run,
+    get_all_runs_summary, find_best_run, log_session_summary,
+    save_best_hyperparams, save_checkpoint, append_metrics, setup_run_logging
+)
+
 # Standardized model path
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "ppo_lunarlander.pt")
+
+# Environment constants
+ENV_NAME = "lunarlander"
+ENV_FULL_NAME = "LunarLander-v3"
+SOLVE_THRESHOLD = 200
 
 
 class ActorCritic(nn.Module):
@@ -182,9 +194,10 @@ def ppo_update(model, optimizer, states, actions, old_log_probs, returns, advant
             optimizer.step()
 
 
-def train():
+def train(session_path: str = None, reason: str = "Initial training attempt",
+          diagnosis: str = "", hp_overrides: dict = None):
     """Main training loop with vectorized environments."""
-    # Hyperparameters
+    # Default hyperparameters
     n_envs = 16  # More parallel environments for complex control
     n_steps = 256  # Longer rollouts (total batch = 4096)
     batch_size = 64
@@ -196,10 +209,41 @@ def train():
     value_coef = 0.5
     entropy_coef = 0.01
     max_iterations = 1000
-    solve_threshold = 200
+    solve_threshold = SOLVE_THRESHOLD
+
+    # Apply hyperparameter overrides
+    if hp_overrides:
+        if "n_envs" in hp_overrides: n_envs = hp_overrides["n_envs"]
+        if "n_steps" in hp_overrides: n_steps = hp_overrides["n_steps"]
+        if "batch_size" in hp_overrides: batch_size = hp_overrides["batch_size"]
+        if "n_epochs" in hp_overrides: n_epochs = hp_overrides["n_epochs"]
+        if "lr" in hp_overrides: lr = hp_overrides["lr"]
+        if "gamma" in hp_overrides: gamma = hp_overrides["gamma"]
+        if "lam" in hp_overrides: lam = hp_overrides["lam"]
+        if "clip_eps" in hp_overrides: clip_eps = hp_overrides["clip_eps"]
+        if "value_coef" in hp_overrides: value_coef = hp_overrides["value_coef"]
+        if "entropy_coef" in hp_overrides: entropy_coef = hp_overrides["entropy_coef"]
+        if "max_iterations" in hp_overrides: max_iterations = hp_overrides["max_iterations"]
+
+    # Session mode setup
+    run_path = None
+    run_id = None
+    log_file = None
+    log_fn = print  # Default to print
+
+    if session_path:
+        config = {
+            "n_envs": n_envs, "n_steps": n_steps, "batch_size": batch_size,
+            "n_epochs": n_epochs, "lr": lr, "gamma": gamma, "lam": lam,
+            "clip_eps": clip_eps, "value_coef": value_coef,
+            "entropy_coef": entropy_coef, "max_iterations": max_iterations
+        }
+        run_path, run_id = start_run(session_path, reason, diagnosis, config,
+                                      ENV_FULL_NAME, SOLVE_THRESHOLD)
+        log_fn, log_file = setup_run_logging(run_path)
 
     # Vectorized environment
-    envs = gym.vector.SyncVectorEnv([lambda: gym.make("LunarLander-v3") for _ in range(n_envs)])
+    envs = gym.vector.SyncVectorEnv([lambda: gym.make(ENV_FULL_NAME) for _ in range(n_envs)])
     obs_dim = envs.single_observation_space.shape[0]
     act_dim = envs.single_action_space.n
 
@@ -211,10 +255,15 @@ def train():
     episode_rewards = []
     episode_reward_buffer = np.zeros(n_envs)
     states, _ = envs.reset()
+    best_reward = float('-inf')
 
-    print("Starting PPO training for LunarLander-v3 (vectorized)...")
-    print(f"Using {n_envs} parallel environments")
-    print(f"Target: Average reward >= {solve_threshold} over 100 episodes\n")
+    log_fn(f"Starting PPO training for {ENV_FULL_NAME} (vectorized)...")
+    log_fn(f"Using {n_envs} parallel environments")
+    log_fn(f"Target: Average reward >= {solve_threshold} over 100 episodes")
+    if run_path:
+        log_fn(f"Run path: {run_path}\n")
+    else:
+        log_fn("")
 
     for iteration in range(max_iterations):
         # Collect rollouts
@@ -254,21 +303,40 @@ def train():
         # Evaluate
         if len(episode_rewards) >= 100:
             avg_reward = np.mean(episode_rewards[-100:])
-            print(f"Iteration {iteration + 1}: Avg reward (last 100 eps) = {avg_reward:.2f}")
+            reward_std = np.std(episode_rewards[-100:])
+            log_fn(f"Iteration {iteration + 1}: Avg reward (last 100 eps) = {avg_reward:.2f}")
+
+            # Track metrics and checkpoints in session mode
+            if run_path:
+                append_metrics(run_path, iteration + 1, avg_reward, reward_std, len(episode_rewards))
+                if avg_reward > best_reward:
+                    best_reward = avg_reward
+                    save_checkpoint(run_path, model, obs_dim, act_dim, iteration + 1, avg_reward)
+                    log_fn(f"  -> New best! Saved checkpoint (reward: {avg_reward:.2f})")
 
             if avg_reward >= solve_threshold:
-                print(f"\nSolved! Average reward {avg_reward:.2f} >= {solve_threshold}")
+                log_fn(f"\nSolved! Average reward {avg_reward:.2f} >= {solve_threshold}")
                 break
         else:
             if len(episode_rewards) > 0:
                 avg_reward = np.mean(episode_rewards)
-                print(f"Iteration {iteration + 1}: Avg reward ({len(episode_rewards)} eps) = {avg_reward:.2f}")
+                reward_std = np.std(episode_rewards)
+                log_fn(f"Iteration {iteration + 1}: Avg reward ({len(episode_rewards)} eps) = {avg_reward:.2f}")
+
+                # Track metrics in session mode
+                if run_path:
+                    append_metrics(run_path, iteration + 1, avg_reward, reward_std, len(episode_rewards))
+                    if avg_reward > best_reward:
+                        best_reward = avg_reward
+                        save_checkpoint(run_path, model, obs_dim, act_dim, iteration + 1, avg_reward)
+                        log_fn(f"  -> New best! Saved checkpoint (reward: {avg_reward:.2f})")
 
     envs.close()
+    final_iteration = iteration + 1
 
     # Final evaluation
-    print("\nRunning final evaluation...")
-    eval_env = gym.make("LunarLander-v3")
+    log_fn("\nRunning final evaluation...")
+    eval_env = gym.make(ENV_FULL_NAME)
     eval_rewards = []
 
     for _ in range(100):
@@ -289,43 +357,100 @@ def train():
     eval_env.close()
 
     final_avg = np.mean(eval_rewards)
-    print(f"Final evaluation: {final_avg:.2f} average reward over 100 episodes")
+    log_fn(f"Final evaluation: {final_avg:.2f} average reward over 100 episodes")
 
-    if final_avg >= solve_threshold:
-        print("SUCCESS: Environment solved!")
+    solved = final_avg >= solve_threshold
+    if solved:
+        log_fn("SUCCESS: Environment solved!")
     else:
-        print(f"Not yet solved (need {solve_threshold})")
+        log_fn(f"Not yet solved (need {solve_threshold})")
 
-    # Save the trained model
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "obs_dim": int(obs_dim),
-        "act_dim": int(act_dim),
-    }, MODEL_PATH)
-    print(f"\nModel saved to: {MODEL_PATH}")
+    # Handle session mode cleanup
+    total_timesteps = final_iteration * n_envs * n_steps
+    if session_path and run_path:
+        status = "SOLVED" if solved else "NOT_SOLVED"
+
+        # Generate diagnosis for next run
+        if solved:
+            run_diagnosis = (
+                f"Successfully solved in {total_timesteps:,} timesteps ({final_iteration} iterations). "
+                f"Final avg reward: {final_avg:.1f}. Learning was stable with consistent improvement."
+            )
+        else:
+            run_diagnosis = (
+                f"Did not solve after {total_timesteps:,} timesteps. "
+                f"Best reward: {best_reward:.1f}, final eval: {final_avg:.1f}. "
+                f"Consider: adjusting learning rate, increasing entropy for exploration, or more training time."
+            )
+
+        stop_run(session_path, run_id, status, run_diagnosis, best_reward, final_iteration, total_timesteps)
+
+        # Find best run across all runs and update session artifacts
+        runs = get_all_runs_summary(session_path, SOLVE_THRESHOLD)
+        best_run = find_best_run(runs)
+
+        if best_run:
+            best_run_path = os.path.join(session_path, best_run["run_id"])
+            best_model_src = os.path.join(best_run_path, "checkpoint_best.pt")
+            best_model_dst = os.path.join(session_path, "best_model.pt")
+
+            if os.path.exists(best_model_src):
+                shutil.copy(best_model_src, best_model_dst)
+                log_fn(f"Best model from {best_run['run_id']} copied to: {best_model_dst}")
+
+            # Save best hyperparameters
+            save_best_hyperparams(
+                session_path, best_run["config"], best_run["run_id"],
+                best_run["total_timesteps"], best_run["final_reward"]
+            )
+            log_fn(f"Best hyperparams saved to: {os.path.join(session_path, 'best_hyperparams.json')}")
+
+        # Log session summary comparing all runs
+        log_session_summary(session_path, SOLVE_THRESHOLD)
+        log_fn(f"Session summary appended to: {os.path.join(session_path, 'session.log')}")
+
+        if log_file:
+            log_file.close()
+    else:
+        # Legacy mode: save to standard location
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "obs_dim": int(obs_dim),
+            "act_dim": int(act_dim),
+        }, MODEL_PATH)
+        log_fn(f"\nModel saved to: {MODEL_PATH}")
 
     return model
 
 
-def play(num_episodes: int = 5):
+def play(num_episodes: int = 5, session_path: str = None):
     """Play back a trained policy with rendering."""
-    if not os.path.exists(MODEL_PATH):
-        print(f"No saved model found at {MODEL_PATH}")
-        print("Please train first: python ppo_lunarlander.py")
-        return
+    # Determine model path
+    if session_path:
+        model_path = os.path.join(session_path, "best_model.pt")
+        if not os.path.exists(model_path):
+            print(f"No best model found at {model_path}")
+            print("Session may not have completed successfully.")
+            return
+    else:
+        model_path = MODEL_PATH
+        if not os.path.exists(model_path):
+            print(f"No saved model found at {model_path}")
+            print("Please train first: python ppo_lunarlander.py")
+            return
 
     # Load model
-    checkpoint = torch.load(MODEL_PATH, weights_only=True)
+    checkpoint = torch.load(model_path, weights_only=True)
     model = ActorCritic(checkpoint["obs_dim"], checkpoint["act_dim"])
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    print(f"Loaded model from {MODEL_PATH}")
+    print(f"Loaded model from {model_path}")
     print(f"Playing {num_episodes} episodes...\n")
 
     # Create environment with human rendering
-    env = gym.make("LunarLander-v3", render_mode="human")
+    env = gym.make(ENV_FULL_NAME, render_mode="human")
 
     for ep in range(num_episodes):
         state, _ = env.reset()
@@ -347,13 +472,56 @@ def play(num_episodes: int = 5):
     print("\nPlayback complete.")
 
 
+def parse_hp_overrides(hp_args: list) -> dict:
+    """Parse --hp key=value arguments into a dict."""
+    overrides = {}
+    if not hp_args:
+        return overrides
+    for hp in hp_args:
+        if "=" not in hp:
+            print(f"Warning: Invalid --hp format '{hp}', expected key=value")
+            continue
+        key, value = hp.split("=", 1)
+        # Type conversion
+        if key in ("n_envs", "n_steps", "batch_size", "n_epochs", "max_iterations"):
+            overrides[key] = int(value)
+        elif key in ("lr", "gamma", "lam", "clip_eps", "value_coef", "entropy_coef"):
+            overrides[key] = float(value)
+        else:
+            print(f"Warning: Unknown hyperparameter '{key}'")
+    return overrides
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PPO for LunarLander-v3")
+    parser = argparse.ArgumentParser(description=f"PPO for {ENV_FULL_NAME}")
     parser.add_argument("--play", action="store_true", help="Play back saved policy")
     parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to play")
+    parser.add_argument("--session", type=str, nargs="?", const="NEW",
+                        help="Session mode: omit path for new session, provide path to continue")
+    parser.add_argument("--reason", type=str, default="Initial training attempt",
+                        help="Reason for starting this run (logged in session.log)")
+    parser.add_argument("--diagnosis", type=str, default="",
+                        help="Diagnosis from previous run explaining what to improve")
+    parser.add_argument("--hp", type=str, action="append", metavar="KEY=VALUE",
+                        help="Hyperparameter override (can be used multiple times)")
     args = parser.parse_args()
 
+    hp_overrides = parse_hp_overrides(args.hp)
+
     if args.play:
-        play(args.episodes)
+        play(args.episodes, session_path=args.session if args.session and args.session != "NEW" else None)
     else:
-        train()
+        if args.session:
+            if args.session == "NEW":
+                session_path = create_session(ENV_NAME, ENV_FULL_NAME, SOLVE_THRESHOLD)
+                print(f"Created new session: {session_path}")
+            else:
+                session_path = args.session
+                if not os.path.isdir(session_path):
+                    print(f"Error: Session path does not exist: {session_path}")
+                    exit(1)
+                print(f"Continuing session: {session_path}")
+            train(session_path=session_path, reason=args.reason, diagnosis=args.diagnosis,
+                  hp_overrides=hp_overrides)
+        else:
+            train(hp_overrides=hp_overrides)
