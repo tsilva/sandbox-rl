@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" alt="sandbox-rl" width="256"/>
+  <img src="assets/logo.png" alt="sandbox-rl" width="512"/>
 
   # sandbox-rl
 
