@@ -8,7 +8,7 @@
   [![Gymnasium](https://img.shields.io/badge/Gymnasium-0081A5?logo=openaigym&logoColor=white)](https://gymnasium.farama.org/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-  **🎮 Clean, self-contained PPO implementations for learning reinforcement learning**
+  **🎮 RL learning sandbox for solving Gymnasium environments 🧠**
 
   [Gymnasium Docs](https://gymnasium.farama.org/) · [PPO Paper](https://arxiv.org/abs/1707.06347)
 </div>
