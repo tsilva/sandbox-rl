@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" alt="sandbox-rl" width="512"/>
+  <img src="https://raw.githubusercontent.com/tsilva/sandbox-rl/main/logo.png" alt="sandbox-rl" width="512"/>
 
   # sandbox-rl
 
