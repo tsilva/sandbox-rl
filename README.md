@@ -1,17 +1,17 @@
-<div align="center">
+<p align="center">
   <img src="https://raw.githubusercontent.com/tsilva/sandbox-rl/main/logo.png" alt="sandbox-rl" width="512"/>
+  <br />
+  <!-- repo-tagline:start -->
+  <strong>🎮 RL learning sandbox for solving Gymnasium environments 🧠</strong>
+  <!-- repo-tagline:end -->
+</p>
 
-  # sandbox-rl
-
-  [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
   [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
   [![Gymnasium](https://img.shields.io/badge/Gymnasium-0081A5?logo=openaigym&logoColor=white)](https://gymnasium.farama.org/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-  **🎮 RL learning sandbox for solving Gymnasium environments 🧠**
-
   [Gymnasium Docs](https://gymnasium.farama.org/) · [PPO Paper](https://arxiv.org/abs/1707.06347)
-</div>
 
 ---
 
