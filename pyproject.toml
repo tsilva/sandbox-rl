@@ -25,3 +25,10 @@ select = ["E", "F", "I"]
 
 [tool.uv]
 package = false
+exclude-newer = "7 days"
+constraint-dependencies = [
+    "fsspec>=2026.6.0",
+    "urllib3>=2.8.0",
+    "mistralai!=2.4.6",
+    "guardrails-ai!=0.10.1",
+]
