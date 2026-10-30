@@ -156,12 +156,12 @@ All implementations use the PPO-Clip algorithm with:
 
 This intentional duplication keeps each implementation simple, portable, and easy to understand without jumping between files.
 
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
 ## Acknowledgements
 
 - [OpenAI Gymnasium](https://gymnasium.farama.org/) — RL environments
 - [PyTorch](https://pytorch.org/) — Deep learning framework
 - [PPO Paper](https://arxiv.org/abs/1707.06347) — Schulman et al., 2017
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
