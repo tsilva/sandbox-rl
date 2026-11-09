@@ -2,7 +2,7 @@
 name = "sandbox-rl"
 version = "0.1.0"
 description = "Reinforcement learning sandbox for Gymnasium environments"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.13.0",
     "numpy",
@@ -14,7 +14,6 @@ dev = [
     "pip-audit>=2.9.0,<3",
     "pytest>=8.4.0",
     "ruff>=0.12.0",
-    "tomli>=2.2.0; python_version < '3.11'",
 ]
 
 [tool.ruff]
@@ -28,6 +27,10 @@ package = false
 exclude-newer = "7 days"
 constraint-dependencies = [
     "fsspec>=2026.6.0",
+    "filelock>=4.2.1",
+    "certifi>=2026.10.18",
+    "msgpack>=1.2.3",
+    "setuptools>=84.1.0",
     "urllib3>=2.8.0",
     "mistralai!=2.4.6",
     "guardrails-ai!=0.10.1",
