@@ -3,5 +3,8 @@ exclude-newer = "7 days"
 constraint-dependencies = [
   "guardrails-ai!=0.10.1",
   "mistralai!=2.4.6",
-  "setuptools>=83.0.0",
+  "setuptools>=84.1.0",
+  "filelock>=4.2.1",
+  "certifi>=2026.10.18",
+  "msgpack>=1.2.3",
 ]
