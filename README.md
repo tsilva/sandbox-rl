@@ -1,3 +1,10 @@
+<!-- archive-repo:deprecation-notice:start -->
+> [!WARNING]
+> **Deprecated**
+>
+> This experimental sandbox has served its purpose and is no longer maintained. Its code and experiment materials remain available here for reference.
+<!-- archive-repo:deprecation-notice:end -->
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/tsilva/sandbox-rl/main/logo.png" alt="sandbox-rl" width="512"/>
   <br />
